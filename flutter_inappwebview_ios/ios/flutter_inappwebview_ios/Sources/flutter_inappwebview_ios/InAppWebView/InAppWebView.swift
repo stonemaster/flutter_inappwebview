@@ -111,7 +111,9 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             if #available(iOS 11, *) {
                 // Above iOS 11, adjust contentInset to compensate the adjustedContentInset so the sum will
                 // always be 0.
-                if (scrollView.adjustedContentInset != .zero) {
+                //
+                // Fix: don't adjust content inset in fullscreen as it moves the WebView content.
+                if (scrollView.adjustedContentInset != .zero && !inFullscreen) {
                     let insetToAdjust = scrollView.adjustedContentInset
                     scrollView.contentInset = UIEdgeInsets(top: -insetToAdjust.top, left: -insetToAdjust.left,
                                                            bottom: -insetToAdjust.bottom, right: -insetToAdjust.right)
