@@ -246,30 +246,34 @@ public class InAppWebViewClientCompat extends WebViewClientCompat {
       inAppBrowserDelegate.didFinishNavigation(url);
     }
 
-    int versionCode = 0;
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      PackageInfo info = WebView.getCurrentWebViewPackage();
-      try {
-        String[] versionParts = info.versionName.split("\\.");
-        if (versionParts.length > 0) {
-          versionCode = Integer.parseInt(versionParts[0]);
-        }
-      } catch (NumberFormatException e) {
-      }
-
-      Log.i(LOG_TAG, "Webview version: " + info.versionName + "; versionCode parsed: " + versionCode);
-    }
-
-    // WebView not storing cookies reliable to local device storage
-    // Note: omit that for versions < 135 as there is a bug that leads to ANRs:
-    // https://issues.chromium.org/issues/404563944
-    if (versionCode > 135) {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-        CookieManager.getInstance().flush();
-      } else {
-        CookieSyncManager.getInstance().sync();
-      }
-    }
+    // Note: CookieManager.flush() seems to trigger ANRs so it is suspended
+    // for now. ALso it definitely triggers an async+onPageFinished ANR on
+    // 134 Webviews.
+    //
+    // int versionCode = 0;
+    // if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+    //   PackageInfo info = WebView.getCurrentWebViewPackage();
+    //   try {
+    //     String[] versionParts = info.versionName.split("\\.");
+    //     if (versionParts.length > 0) {
+    //       versionCode = Integer.parseInt(versionParts[0]);
+    //     }
+    //   } catch (NumberFormatException e) {
+    //   }
+    //
+    //   Log.i(LOG_TAG, "Webview version: " + info.versionName + "; versionCode parsed: " + versionCode);
+    // }
+    //
+    // // WebView not storing cookies reliable to local device storage
+    // // Note: omit that for versions < 135 as there is a bug that leads to ANRs:
+    // // https://issues.chromium.org/issues/404563944
+    // if (versionCode > 135) {
+    //   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+    //     CookieManager.getInstance().flush();
+    //   } else {
+    //     CookieSyncManager.getInstance().sync();
+    //   }
+    // }
 
     String js = JavaScriptBridgeJS.PLATFORM_READY_JS_SOURCE();
     webView.evaluateJavascript(js, (ValueCallback<String>) null);
