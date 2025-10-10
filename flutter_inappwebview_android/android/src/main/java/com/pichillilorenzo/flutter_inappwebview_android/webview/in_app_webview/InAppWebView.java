@@ -62,6 +62,7 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.webkit.ProfileStore;
 import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
@@ -119,6 +120,7 @@ import io.flutter.plugin.common.MethodChannel;
 final public class InAppWebView extends InputAwareWebView implements InAppWebViewInterface {
   private static final String LOG_TAG = "InAppWebView";
   public static final String METHOD_CHANNEL_NAME_PREFIX = "com.pichillilorenzo/flutter_inappwebview_";
+  public static final String INCOGNITO_PROFILE_PREFIX = "incognito_";
 
   @Nullable
   public InAppWebViewFlutterPlugin plugin;
@@ -639,26 +641,20 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
   public void setIncognito(boolean enabled) {
     WebSettings settings = getSettings();
     if (enabled) {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-        CookieManager.getInstance().removeAllCookies(null);
-      } else {
-        CookieManager.getInstance().removeAllCookie();
+      if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+                String profile = INCOGNITO_PROFILE_PREFIX + id;
+                Log.i(LOG_TAG, "Setting incognito profile: " + profile);
+                WebViewCompat.setProfile(this, profile);
+            }
+            settings.setSavePassword(false);
+            settings.setSaveFormData(false);
+            settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
       }
-
-      // Disable caching
-      settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
-
-      // removed from Android API 33+ (https://developer.android.com/sdk/api_diff/33/changes)
-      // settings.setAppCacheEnabled(false);
-      Util.invokeMethodIfExists(settings, "setAppCacheEnabled", false);
-
-      clearHistory();
-      clearCache(true);
-
-      // No form data or autofill enabled
-      clearFormData();
-      settings.setSavePassword(false);
-      settings.setSaveFormData(false);
     } else {
       settings.setCacheMode(WebSettings.LOAD_DEFAULT);
 
