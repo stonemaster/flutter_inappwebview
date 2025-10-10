@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 import android.os.Message;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.ValueCallback;
@@ -12,6 +13,7 @@ import android.webkit.WebView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.webkit.ProfileStore;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
@@ -19,6 +21,7 @@ import com.pichillilorenzo.flutter_inappwebview_android.InAppWebViewFlutterPlugi
 import com.pichillilorenzo.flutter_inappwebview_android.plugin_scripts_js.JavaScriptBridgeJS;
 import com.pichillilorenzo.flutter_inappwebview_android.types.ChannelDelegateImpl;
 import com.pichillilorenzo.flutter_inappwebview_android.webview.in_app_webview.FlutterWebView;
+import com.pichillilorenzo.flutter_inappwebview_android.webview.in_app_webview.InAppWebView;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -144,6 +147,7 @@ public class InAppWebViewManager extends ChannelDelegateImpl {
         final String keepAliveId = (String) call.argument("keepAliveId");
         if (keepAliveId != null) {
           disposeKeepAlive(keepAliveId);
+          tryClearAllUnusedIncognitoProfiles();
         }
         result.success(true);
         break;
@@ -214,6 +218,26 @@ public class InAppWebViewManager extends ChannelDelegateImpl {
     }
   }
 
+  /// The `ProfileStore` API is used to manage multiple WebView profiles, including incognito profiles.
+  /// It is unclear when the system marks a profile "not-in-use" so we just try
+  /// opportunistically to clear all unused incognito profiles when a keep-alive WebView is disposed.
+  private void tryClearAllUnusedIncognitoProfiles() {
+    if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+      return;
+    }
+
+    for (String profile : ProfileStore.getInstance().getAllProfileNames()) {
+      if (profile.startsWith(InAppWebView.INCOGNITO_PROFILE_PREFIX)) {
+        try {
+          ProfileStore.getInstance().deleteProfile(profile);
+          Log.i(LOG_TAG, "Deleted incognito profile: " + profile);
+        } catch (Exception e) {
+          Log.w(LOG_TAG, "Couldn't delete incognito profile: " + profile);
+        }
+      }
+    }
+  }
+
   public void clearAllCache(@NonNull Context context, boolean includeDiskFiles) {
     WebView tempWebView = new WebView(context);
     tempWebView.clearCache(includeDiskFiles);
@@ -235,5 +259,6 @@ public class InAppWebViewManager extends ChannelDelegateImpl {
     keepAliveWebViews.clear();
     windowWebViewMessages.clear();
     plugin = null;
+    tryClearAllUnusedIncognitoProfiles();
   }
 }
