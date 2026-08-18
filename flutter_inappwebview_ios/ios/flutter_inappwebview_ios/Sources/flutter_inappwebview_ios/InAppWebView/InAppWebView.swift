@@ -831,10 +831,12 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
                     if fullscreenState == .enteringFullscreen && !inFullscreen {
                         channelDelegate?.onEnterFullscreen()
                         inFullscreen = true
+                        disableInsetCompensationForFullscreen()
                     } else if fullscreenState == .exitingFullscreen && inFullscreen {
                         fullscreenWindow = nil
                         channelDelegate?.onExitFullscreen()
                         inFullscreen = false
+                        restoreInsetCompensationAfterFullscreen()
                     }
                 }
             }
@@ -2896,6 +2898,29 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         return isFullScreenSize && hasElevatedWindowLevel
     }
     
+    /// Disables the contentInset-compensation hack (contentInset = -adjustedContentInset)
+    /// for the fullscreen duration. The compensation feeds WebKit a shifted content rect,
+    /// which can make the fullscreen video appear misplaced.
+    private func disableInsetCompensationForFullscreen() {
+        scrollView.contentInset = .zero
+    }
+    
+    /// Re-applies the contentInset compensation disabled by
+    /// `disableInsetCompensationForFullscreen()` when leaving fullscreen.
+    private func restoreInsetCompensationAfterFullscreen() {
+        if #available(iOS 11, *) {
+            if scrollView.adjustedContentInset != .zero {
+                let insetToAdjust = scrollView.adjustedContentInset
+                scrollView.contentInset = UIEdgeInsets(top: -insetToAdjust.top, left: -insetToAdjust.left,
+                                                       bottom: -insetToAdjust.bottom, right: -insetToAdjust.right)
+            } else {
+                scrollView.contentInset = .zero
+            }
+        } else {
+            scrollView.contentInset = .zero
+        }
+    }
+    
     @objc func onEnterFullscreen(_ notification: Notification) {
         // Check if already in fullscreen to avoid double-firing
         // (both KVO observer and UIWindow notification might trigger this)
@@ -2905,6 +2930,7 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             fullscreenWindow = notification.object as? UIWindow
             channelDelegate?.onEnterFullscreen()
             inFullscreen = true
+            disableInsetCompensationForFullscreen()
         }
     }
     
@@ -2923,6 +2949,7 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             fullscreenWindow = nil
             channelDelegate?.onExitFullscreen()
             inFullscreen = false
+            restoreInsetCompensationAfterFullscreen()
         }
     }
     
