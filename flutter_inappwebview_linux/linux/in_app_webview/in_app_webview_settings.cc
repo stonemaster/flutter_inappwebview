@@ -400,12 +400,12 @@ void InAppWebViewSettings::applyWpePlatformSettings(void* display_ptr) const {
     g_clear_error(&error);
   }
 
-  // Apply disable animations setting
-  if (disableAnimations.has_value()) {
-    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_DISABLE_ANIMATIONS,
-                             disableAnimations.value(), WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
+  // // Apply disable animations setting
+  // if (disableAnimations.has_value()) {
+  //   wpe_settings_set_boolean(wpe_settings, WPE_SETTING_DISABLE_ANIMATIONS,
+  //                            disableAnimations.value(), WPE_SETTINGS_SOURCE_APPLICATION, &error);
+  //   g_clear_error(&error);
+  // }
 
   // Apply font antialias setting
   if (fontAntialias.has_value()) {
