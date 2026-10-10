@@ -1,11 +1,83 @@
 #include "inappwebview_egl_texture.h"
 
+#include <unistd.h>
+
 #include <epoxy/egl.h>
 #include <epoxy/gl.h>
 
 #include "../utils/gl_context.h"
 #include "../utils/log.h"
 #include "in_app_webview.h"
+
+// EGL_EXT_image_dma_buf_import tokens. epoxy's generated EGL header provides
+// these on modern systems; keep numeric fallbacks for older epoxy/Khronos
+// headers so this file compiles everywhere.
+#ifndef EGL_LINUX_DMA_BUF_EXT
+#define EGL_LINUX_DMA_BUF_EXT 0x3270
+#endif
+#ifndef EGL_LINUX_DRM_FOURCC_EXT
+#define EGL_LINUX_DRM_FOURCC_EXT 0x3271
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_FD_EXT
+#define EGL_DMA_BUF_PLANE0_FD_EXT 0x3272
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_OFFSET_EXT
+#define EGL_DMA_BUF_PLANE0_OFFSET_EXT 0x3273
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_PITCH_EXT
+#define EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
+#endif
+#ifndef EGL_DMA_BUF_PLANE1_FD_EXT
+#define EGL_DMA_BUF_PLANE1_FD_EXT 0x3275
+#endif
+#ifndef EGL_DMA_BUF_PLANE1_OFFSET_EXT
+#define EGL_DMA_BUF_PLANE1_OFFSET_EXT 0x3276
+#endif
+#ifndef EGL_DMA_BUF_PLANE1_PITCH_EXT
+#define EGL_DMA_BUF_PLANE1_PITCH_EXT 0x3277
+#endif
+#ifndef EGL_DMA_BUF_PLANE2_FD_EXT
+#define EGL_DMA_BUF_PLANE2_FD_EXT 0x3278
+#endif
+#ifndef EGL_DMA_BUF_PLANE2_OFFSET_EXT
+#define EGL_DMA_BUF_PLANE2_OFFSET_EXT 0x3279
+#endif
+#ifndef EGL_DMA_BUF_PLANE2_PITCH_EXT
+#define EGL_DMA_BUF_PLANE2_PITCH_EXT 0x327A
+#endif
+#ifndef EGL_DMA_BUF_PLANE3_FD_EXT
+#define EGL_DMA_BUF_PLANE3_FD_EXT 0x3440
+#endif
+#ifndef EGL_DMA_BUF_PLANE3_OFFSET_EXT
+#define EGL_DMA_BUF_PLANE3_OFFSET_EXT 0x3441
+#endif
+#ifndef EGL_DMA_BUF_PLANE3_PITCH_EXT
+#define EGL_DMA_BUF_PLANE3_PITCH_EXT 0x3442
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT 0x3443
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT 0x3444
+#endif
+#ifndef EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT
+#define EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT 0x3445
+#endif
+#ifndef EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT
+#define EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT 0x3446
+#endif
+#ifndef EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT
+#define EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT 0x3447
+#endif
+#ifndef EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT
+#define EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT 0x3448
+#endif
+#ifndef EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT
+#define EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT 0x3449
+#endif
+#ifndef EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT
+#define EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT 0x344A
+#endif
 
 // Use the shared HasCurrentGLContext from gl_context.h
 static gboolean has_current_gl_context() {
@@ -62,6 +134,12 @@ struct _InAppWebViewEGLTexture {
   gboolean extension_checked;
   gboolean extension_available;
 
+  // Consumer-side EGLImage re-imported from the WPE dma_buf frame on FLUTTER's
+  // current EGL display (the producer EGLImage cannot be bound cross-display).
+  void* flutter_egl_image;        // EGLImageKHR
+  EGLDisplay flutter_egl_display; // display the image was created on
+  uint64_t imported_serial;       // frame serial the image was made from
+
   // Mutex to protect frame data access
   GMutex mutex;
 };
@@ -104,6 +182,45 @@ static gboolean check_egl_image_extension(InAppWebViewEGLTexture* self) {
   return self->extension_available;
 }
 
+// DRM_FORMAT_MOD_INVALID - when the modifier equals this, the driver uses the
+// buffer's implicit modifier and we must NOT pass modifier attribs. Matches
+// libdrm's <drm/drm_fourcc.h> definition (kept local to avoid the dep).
+static const uint64_t kDrmFormatModInvalid = (static_cast<uint64_t>(1) << 56) - 1;
+
+// Per-plane EGL dma_buf attrib tokens (plane3 is NOT contiguous with 0..2).
+static const EGLint kDmaBufPlaneFdAttrib[4] = {
+    EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT,
+    EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE3_FD_EXT};
+static const EGLint kDmaBufPlaneOffsetAttrib[4] = {
+    EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+    EGL_DMA_BUF_PLANE2_OFFSET_EXT, EGL_DMA_BUF_PLANE3_OFFSET_EXT};
+static const EGLint kDmaBufPlanePitchAttrib[4] = {
+    EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT,
+    EGL_DMA_BUF_PLANE2_PITCH_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT};
+static const EGLint kDmaBufPlaneModLoAttrib[4] = {
+    EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+    EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT};
+static const EGLint kDmaBufPlaneModHiAttrib[4] = {
+    EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+    EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT};
+
+// Destroy the consumer-side EGLImage (if any). Call with self->mutex held.
+// Best effort: the display handle may already be gone during shutdown.
+static void inappwebview_egl_texture_release_flutter_image(InAppWebViewEGLTexture* self) {
+  if (self->flutter_egl_image != nullptr && self->flutter_egl_display != EGL_NO_DISPLAY) {
+    static PFNEGLDESTROYIMAGEKHRPROC destroy_image = nullptr;
+    if (destroy_image == nullptr) {
+      destroy_image = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+    }
+    if (destroy_image != nullptr) {
+      destroy_image(self->flutter_egl_display,
+                    static_cast<EGLImageKHR>(self->flutter_egl_image));
+    }
+  }
+  self->flutter_egl_image = nullptr;
+  self->flutter_egl_display = EGL_NO_DISPLAY;
+}
+
 // Populate callback - called by Flutter to get the OpenGL texture
 static gboolean inappwebview_egl_texture_populate(FlTextureGL* texture, uint32_t* target,
                                                   uint32_t* name, uint32_t* out_width,
@@ -140,44 +257,197 @@ static gboolean inappwebview_egl_texture_populate(FlTextureGL* texture, uint32_t
     return FALSE;
   }
 
-  // Use the EGL image that was set via inappwebview_egl_texture_set_egl_image()
-  // This is updated by the on_frame_available callback before Flutter is notified
-  if (self->current_egl_image != nullptr && self->width > 0 && self->height > 0) {
-    // Check if EGL image extension is available
-    if (check_egl_image_extension(self)) {
-      // Create texture if needed
+  // Determine the consumer display and whether the producer's EGLImage can be
+  // bound here directly. EGL images are display-specific: WPE imported the
+  // frame on ITS display (egl_display_), so binding that image inside Flutter's
+  // context on a DIFFERENT display is undefined and renders black. In that
+  // case we re-import the frame's dma_buf planes as a NEW EGLImage on Flutter's
+  // current display. When the displays match (or no exported frame exists),
+  // fall through to the existing zero-copy / legacy path below.
+  EGLDisplay buf_dpy = eglGetCurrentDisplay();
+  std::shared_ptr<const flutter_inappwebview_plugin::DmabufFrameExport> frame;
+  if (self->webview != nullptr) {
+    frame = self->webview->GetDmabufFrame();
+  }
+  const bool same_display =
+      self->webview != nullptr &&
+      reinterpret_cast<EGLDisplay>(self->webview->GetEglDisplay()) == buf_dpy;
+
+  if (frame && frame->n_planes > 0 && frame->n_planes <= 4 && frame->width > 0 &&
+      frame->height > 0 && !same_display) {
+    // === Consumer-side re-import of the WPE dma_buf frame ===
+    static bool consumer_import_failed = false;
+    const bool reimport =
+        self->flutter_egl_image == nullptr || self->imported_serial != frame->serial;
+    if (reimport && !consumer_import_failed) {
+      inappwebview_egl_texture_release_flutter_image(self);
+      static PFNEGLCREATEIMAGEKHRPROC create_image = nullptr;
+      if (create_image == nullptr) {
+        create_image = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+      }
+      if (create_image != nullptr) {
+        // Max slots: 3 global key/value pairs (6) + 4 planes x 8 (FD/OFFSET/PITCH/
+        // MOD_LO/MOD_HI = 5 pairs = 10... conservatively size 64 and guard).
+        EGLint attribs[64];
+        int ai = 0;
+        int dup_fds[4] = {-1, -1, -1, -1};  // temp copies for the create call
+        bool ok = true;
+        auto put = [&attribs, &ai, &ok](EGLint key, EGLint value) {
+          if (ai + 2 > 64) {  // keep room for EGL_NONE terminator
+            ok = false;
+            return;
+          }
+          attribs[ai++] = key;
+          attribs[ai++] = value;
+        };
+
+        put(EGL_WIDTH, static_cast<EGLint>(frame->width));
+        put(EGL_HEIGHT, static_cast<EGLint>(frame->height));
+        put(EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(frame->format));
+
+        // Pass explicit modifiers only when known; with the invalid sentinel the
+        // driver must use the buffer's implicit modifier (attribs omitted).
+        const bool use_modifier = (frame->modifier != kDrmFormatModInvalid);
+        for (uint32_t p = 0; p < frame->n_planes && ok; ++p) {
+          if (frame->fds[p] < 0) {
+            ok = false;
+            break;
+          }
+          const int dfd = ::dup(frame->fds[p]);
+          if (dfd < 0) {
+            ok = false;
+            break;
+          }
+          dup_fds[p] = dfd;
+          put(kDmaBufPlaneFdAttrib[p], static_cast<EGLint>(dfd));
+          put(kDmaBufPlaneOffsetAttrib[p], static_cast<EGLint>(frame->offsets[p]));
+          put(kDmaBufPlanePitchAttrib[p], static_cast<EGLint>(frame->strides[p]));
+          if (use_modifier) {
+            put(kDmaBufPlaneModLoAttrib[p],
+                static_cast<EGLint>(frame->modifier & 0xFFFFFFFFull));
+            put(kDmaBufPlaneModHiAttrib[p], static_cast<EGLint>(frame->modifier >> 32));
+          }
+        }
+
+        EGLImageKHR img = EGL_NO_IMAGE_KHR;
+        if (ok && ai + 1 <= 64) {
+          attribs[ai++] = EGL_NONE;
+          img = create_image(buf_dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
+                             static_cast<EGLClientBuffer>(nullptr), attribs);
+        }
+        // EGL dups the fds internally during create; close our temp copies.
+        for (int p = 0; p < 4; ++p) {
+          if (dup_fds[p] >= 0) {
+            ::close(dup_fds[p]);
+            dup_fds[p] = -1;
+          }
+        }
+
+        if (img != EGL_NO_IMAGE_KHR) {
+          self->flutter_egl_image = static_cast<void*>(img);
+          self->flutter_egl_display = buf_dpy;
+          self->imported_serial = frame->serial;
+          self->width = frame->width;  // dma_buf dims are authoritative here
+          self->height = frame->height;
+        } else {
+          consumer_import_failed = true;
+          static bool first_fail = true;
+          if (first_fail) {
+            g_warning("[flutter_inappwebview] populate: consumer-side EGLImage import FAILED "
+                      "(egl=%d, attribs_ok=%d), falling back",
+                      static_cast<int>(eglGetError()), ok ? 1 : 0);
+            first_fail = false;
+          }
+        }
+      }
+    }
+
+    // Bind the consumer-side image when we have one.
+    if (self->flutter_egl_image != nullptr && check_egl_image_extension(self)) {
+      // Drain stale latched GL errors so the post-bind check is meaningful.
+      while (glGetError() != GL_NO_ERROR) {
+      }
+
       if (!self->texture_initialized) {
         glGenTextures(1, &self->texture_id);
         self->texture_initialized = TRUE;
       }
 
-      // Bind the EGL image to our texture - ZERO-COPY!
       glBindTexture(GL_TEXTURE_2D, self->texture_id);
       self->glEGLImageTargetTexture2DOES(GL_TEXTURE_2D,
-                                         static_cast<GLeglImageOES>(self->current_egl_image));
+                                         static_cast<GLeglImageOES>(self->flutter_egl_image));
+      GLenum gl_err = glGetError();
+      if (gl_err == GL_NO_ERROR) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-      // Set texture parameters
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
 
+        self->texture_width = self->width;
+        self->texture_height = self->height;
+
+        *target = GL_TEXTURE_2D;
+        *name = self->texture_id;
+        *out_width = self->width;
+        *out_height = self->height;
+
+        self->has_new_frame = FALSE;
+
+        g_mutex_unlock(&self->mutex);
+        return TRUE;
+      }
+
+      static bool first_bind_fail = true;
+      if (first_bind_fail) {
+        g_warning("[flutter_inappwebview] populate: consumer EGLImage bind failed (gl=0x%x), "
+                  "falling back",
+                  static_cast<unsigned>(gl_err));
+        first_bind_fail = false;
+      }
+      // Bind error: unbind and fall through to the pixel fallback below.
       glBindTexture(GL_TEXTURE_2D, 0);
-
-      // Update tracked dimensions
-      self->texture_width = self->width;
-      self->texture_height = self->height;
-
-      *target = GL_TEXTURE_2D;
-      *name = self->texture_id;
-      *out_width = self->width;
-      *out_height = self->height;
-      
-      self->has_new_frame = FALSE;
-
-      g_mutex_unlock(&self->mutex);
-      return TRUE;
     }
+  } else if (self->current_egl_image != nullptr && self->width > 0 && self->height > 0 &&
+             check_egl_image_extension(self)) {
+    // EXISTING zero-copy path. Valid only when the producer EGLImage lives on
+    // the SAME display as Flutter's context (e.g. legacy WPEBackend-FDO).
+    flutter_inappwebview_plugin::debugLog(
+        "InAppWebViewEGLTexture: using producer EGLImage directly (same-display path), size=" +
+        std::to_string(self->width) + "x" + std::to_string(self->height));
+    // Create texture if needed
+    if (!self->texture_initialized) {
+      glGenTextures(1, &self->texture_id);
+      self->texture_initialized = TRUE;
+    }
+
+    // Bind the EGL image to our texture - ZERO-COPY!
+    glBindTexture(GL_TEXTURE_2D, self->texture_id);
+    self->glEGLImageTargetTexture2DOES(GL_TEXTURE_2D,
+                                       static_cast<GLeglImageOES>(self->current_egl_image));
+
+    // Set texture parameters
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Update tracked dimensions
+    self->texture_width = self->width;
+    self->texture_height = self->height;
+
+    *target = GL_TEXTURE_2D;
+    *name = self->texture_id;
+    *out_width = self->width;
+    *out_height = self->height;
+    
+    self->has_new_frame = FALSE;
+
+    g_mutex_unlock(&self->mutex);
+    return TRUE;
   }
 
   // Fallback: Try to get pixel buffer from webview (SHM mode)
@@ -287,6 +557,11 @@ static void inappwebview_egl_texture_dispose(GObject* object) {
   self->default_texture_initialized = FALSE;
   self->current_egl_image = nullptr;
 
+  // Destroy our consumer-side EGLImage (best effort: the EGL display may
+  // already be gone during shutdown; the release helper is null-safe).
+  inappwebview_egl_texture_release_flutter_image(self);
+  self->imported_serial = 0;
+
   g_mutex_unlock(&self->mutex);
   g_mutex_clear(&self->mutex);
 
@@ -315,6 +590,9 @@ static void inappwebview_egl_texture_init(InAppWebViewEGLTexture* self) {
   self->glEGLImageTargetTexture2DOES = nullptr;
   self->extension_checked = FALSE;
   self->extension_available = FALSE;
+  self->flutter_egl_image = nullptr;
+  self->flutter_egl_display = EGL_NO_DISPLAY;
+  self->imported_serial = 0;
   g_mutex_init(&self->mutex);
 }
 

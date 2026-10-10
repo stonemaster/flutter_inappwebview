@@ -43,6 +43,8 @@
 #include <wpe/fdo.h>
 #endif
 
+#include <unistd.h>
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -81,6 +83,34 @@ class UserContentController;
 class WebMessageChannel;
 class WebMessageListener;
 class WebViewChannelDelegate;
+
+// Exported dma_buf frame info, used to re-import the frame as an EGLImage
+// on the CONSUMER (Flutter) EGLDisplay. Requires GL_OES_EGL_image.
+//
+// WHY: WPE imports its dma_buf frames into an EGLImage on the WPE headless
+// display's EGLDisplay. EGL images are display-specific, so binding such an
+// image inside Flutter's GL context (a DIFFERENT EGLDisplay) is undefined and
+// renders black. Instead we export the frame's dma_buf planes here and let the
+// texture re-import a NEW EGLImage on Flutter's current EGL display.
+struct DmabufFrameExport {
+  uint64_t serial = 0;                    // increments per dma_buf frame
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t format = 0;                    // DRM fourcc
+  uint32_t n_planes = 0;
+  int fds[4] = {-1, -1, -1, -1};          // owned; closed in destructor
+  uint32_t strides[4] = {0, 0, 0, 0};
+  uint32_t offsets[4] = {0, 0, 0, 0};
+  uint64_t modifier = 0;                  // DRM_FORMAT_MOD_LINEAR or impl-defined
+  ~DmabufFrameExport() {
+    for (int& fd : fds) {
+      if (fd >= 0) {
+        ::close(fd);
+        fd = -1;
+      }
+    }
+  }
+};
 
 struct InAppWebViewCreationParams {
   int64_t id;
@@ -305,6 +335,13 @@ class InAppWebView {
   // The EGL image is owned by WPE and remains valid until the next frame.
   void* GetCurrentEglImage(uint32_t* out_width, uint32_t* out_height) const;
 
+  // Returns the latest dma_buf frame exported by WPE (or nullptr for SHM/legacy
+  // frames). The shared_ptr's fds are owned by the struct and must stay open for
+  // the lifetime of any EGLImage imported from them.
+  std::shared_ptr<const DmabufFrameExport> GetDmabufFrame() const;
+  // The producer-side EGLDisplay handle (for display identity checks).
+  void* GetEglDisplay() const { return egl_display_; }
+
   // Skip pixel readback - when using zero-copy EGL texture mode, we don't need
   // to read pixels back to CPU. This improves performance and avoids GL context issues.
   void SetSkipPixelReadback(bool skip) { skip_pixel_readback_ = skip; }
@@ -507,6 +544,14 @@ class InAppWebView {
   void* egl_context_ = nullptr;        // EGLContext for readback
   unsigned int fbo_ = 0;               // Framebuffer object for EGL image binding
   unsigned int readback_texture_ = 0;  // Texture for EGL image
+
+  // Latest WPE-exported dma_buf frame, for consumer-side EGLImage re-import on
+  // Flutter's EGLDisplay (see DmabufFrameExport above). Owned here; the fds are
+  // closed when the struct is destroyed (when replaced by a newer frame or when
+  // the webview is destroyed).
+  mutable std::shared_ptr<const DmabufFrameExport> dmabuf_frame_;
+  mutable std::mutex dmabuf_frame_mutex_;
+  [[maybe_unused]] uint64_t frame_serial_ = 0;  // Increments per captured dma_buf frame
 
   // Triple buffering for pixel data (fallback when DMA-BUF not available)
   static constexpr size_t kNumBuffers = 3;

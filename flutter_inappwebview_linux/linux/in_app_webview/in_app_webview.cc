@@ -30,6 +30,7 @@
 #include <wpe/wpe-platform.h>
 #include <wpe/headless/wpe-headless.h>
 #include <wpe/WPEBufferSHM.h>  // For SHM software rendering fallback
+#include <wpe/WPEBufferDMABuf.h>  // For dma_buf plane export (consumer-side EGL import)
 #endif
 
 // WPEBackend-FDO API (legacy)
@@ -1293,12 +1294,49 @@ void InAppWebView::OnWpePlatformBufferRendered(WPEBuffer* buffer) {
         current_buffer_width_ = buf_width;
         current_buffer_height_ = buf_height;
         buffer_handled = true;
+
+        // Export the frame's dma_buf planes so the consumer (Flutter's render
+        // thread) can re-import them as an EGLImage on Flutter's own EGLDisplay.
+        // The producer EGLImage above (current_egl_image_) is only bindable on
+        // egl_display_; binding it on a foreign display renders black.
+        WPEBufferDMABuf* dmabuf_buf = WPE_BUFFER_DMA_BUF(buffer);
+        auto export_frame = std::shared_ptr<DmabufFrameExport>(new DmabufFrameExport());
+        export_frame->serial = ++frame_serial_;
+        export_frame->width = buf_width;
+        export_frame->height = buf_height;
+        export_frame->format = wpe_buffer_dma_buf_get_format(dmabuf_buf);
+        export_frame->n_planes = wpe_buffer_dma_buf_get_n_planes(dmabuf_buf);
+        export_frame->modifier = wpe_buffer_dma_buf_get_modifier(dmabuf_buf);
+        if (export_frame->n_planes > 4) {
+          export_frame->n_planes = 0;  // corrupt guard
+        }
+        for (uint32_t p = 0; p < export_frame->n_planes; ++p) {
+          int src_fd = wpe_buffer_dma_buf_get_fd(dmabuf_buf, p);
+          if (src_fd < 0) {
+            export_frame.reset();
+            break;
+          }
+          export_frame->fds[p] = ::dup(src_fd);  // we own our copies; producer may close originals
+          export_frame->strides[p] = wpe_buffer_dma_buf_get_stride(dmabuf_buf, p);
+          export_frame->offsets[p] = wpe_buffer_dma_buf_get_offset(dmabuf_buf, p);
+        }
+        {
+          std::lock_guard<std::mutex> f_lock(dmabuf_frame_mutex_);
+          dmabuf_frame_ = export_frame;  // may be nullptr -> fallback paths used
+        }
       } else {
         // Mark EGL as permanently failed so we don't keep trying
         // This is common in VMs or software-only environments
         egl_import_failed_permanently = true;
+        {
+          std::lock_guard<std::mutex> f_lock(dmabuf_frame_mutex_);
+          dmabuf_frame_ = nullptr;
+        }
         if (error != nullptr) {
+          g_warning("[flutter_inappwebview] EGL import FAILED permanently: %s", error->message);
           g_clear_error(&error);
+        } else {
+          g_warning("[flutter_inappwebview] EGL import FAILED permanently (no GError)");
         }
       }
     }
@@ -3695,6 +3733,11 @@ void* InAppWebView::GetCurrentEglImage(uint32_t* out_width, uint32_t* out_height
     *out_height = 0;
   return nullptr;
 #endif
+}
+
+std::shared_ptr<const DmabufFrameExport> InAppWebView::GetDmabufFrame() const {
+  std::lock_guard<std::mutex> lock(dmabuf_frame_mutex_);
+  return dmabuf_frame_;
 }
 
 void InAppWebView::SetOnFrameAvailable(std::function<void()> callback) {
