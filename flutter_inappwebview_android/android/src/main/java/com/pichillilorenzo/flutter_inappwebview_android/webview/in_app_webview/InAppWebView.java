@@ -590,7 +590,19 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
         com.pichillilorenzo.flutter_inappwebview_android.types.HitTestResult hitTestResult =
                 com.pichillilorenzo.flutter_inappwebview_android.types.HitTestResult.fromWebViewHitTestResult(getHitTestResult());
         if (channelDelegate != null) channelDelegate.onLongPressHitTestResult(hitTestResult);
-        return false;
+        // Consume the long click when the target is a link or an image so the
+        // WebView does not start its built-in long-press drag-and-drop gesture
+        // (available since API 31). That drag session issues ACTION_CANCEL into
+        // the platform view, canceling the Flutter pointer events and thus
+        // breaking Flutter-side long-press detection over the webview.
+        // For other targets (e.g. plain text selection) we keep the default
+        // behavior by returning false.
+        boolean isLinkOrImage =
+                hitTestResult != null &&
+                (hitTestResult.getType() == WebView.HitTestResult.SRC_ANCHOR_TYPE
+                    || hitTestResult.getType() == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+                    || hitTestResult.getType() == WebView.HitTestResult.IMAGE_TYPE);
+        return isLinkOrImage;
       }
     });
   }
