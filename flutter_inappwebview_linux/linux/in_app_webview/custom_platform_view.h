@@ -19,7 +19,8 @@ using WebViewType = InAppWebView;
 class CustomPlatformView {
  public:
   CustomPlatformView(FlBinaryMessenger* messenger, FlTextureRegistrar* texture_registrar,
-                     std::shared_ptr<WebViewType> webview);
+                     std::shared_ptr<WebViewType> webview,
+                     const std::string& controller_channel_id = "");
   ~CustomPlatformView();
 
   int64_t texture_id() const { return texture_id_; }
@@ -40,6 +41,10 @@ class CustomPlatformView {
   InAppWebViewEGLTexture* egl_texture_ = nullptr;  // Pointer to EGL texture if using zero-copy mode
   int64_t texture_id_ = -1;
   std::string keepAliveId_;  // Keep-alive ID for preserving WebView across widget disposal
+  // When non-empty, the webview's controller MethodChannel
+  // ("com.pichillilorenzo/flutter_inappwebview_<ID>") is attached using this id
+  // (keep-alive id) instead of the texture id.
+  std::string controller_channel_id_;
 
   FlMethodChannel* method_channel_ = nullptr;
   FlEventChannel* event_channel_ = nullptr;

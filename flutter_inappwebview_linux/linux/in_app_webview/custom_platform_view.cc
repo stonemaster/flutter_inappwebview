@@ -81,8 +81,11 @@ bool UseGLTexture() {
 
 CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
                                        FlTextureRegistrar* texture_registrar,
-                                       std::shared_ptr<WebViewType> webview)
-    : webview_(std::move(webview)), texture_registrar_(texture_registrar) {
+                                       std::shared_ptr<WebViewType> webview,
+                                       const std::string& controller_channel_id)
+    : webview_(std::move(webview)),
+      texture_registrar_(texture_registrar),
+      controller_channel_id_(controller_channel_id) {
   if (messenger == nullptr) {
     errorLog("CustomPlatformView: messenger is null");
     return;
@@ -129,11 +132,19 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
   // Now get the texture ID after registration
   texture_id_ = fl_texture_get_id(texture_);
 
-  // Attach the webview method channel using the same id used on Dart side.
-  // Dart uses the returned id from createInAppWebView as both textureId and
-  // controller/view id.
+  // Attach the webview method channel using the same id used on the Dart side.
+  // Without keep-alive, Dart uses the returned texture id as the controller/view id,
+  // so the channel is attached under the texture id.
+  // With keep-alive, Dart instead uses the keepAliveId (passed via
+  // controller_channel_id), so the channel must be attached under that id —
+  // otherwise Dart method calls (e.g. loadUrl) would hit a channel that has no
+  // native handler (MissingPluginException).
   if (webview_ != nullptr) {
-    webview_->AttachChannel(messenger, texture_id_);
+    if (!controller_channel_id_.empty()) {
+      webview_->AttachChannel(messenger, controller_channel_id_, false);
+    } else {
+      webview_->AttachChannel(messenger, texture_id_);
+    }
   }
 
   // Set up the webview's callback to mark frame available

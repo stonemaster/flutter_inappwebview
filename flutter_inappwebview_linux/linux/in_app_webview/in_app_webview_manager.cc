@@ -243,7 +243,7 @@ void InAppWebViewManager::CreateInAppWebView(FlMethodCall* method_call) {
   auto webview = std::make_shared<InAppWebView>(registrar_, messenger_, params.id, params);
 
   auto platform_view =
-      std::make_unique<CustomPlatformView>(messenger_, texture_registrar_, webview);
+      std::make_unique<CustomPlatformView>(messenger_, texture_registrar_, webview, keepAliveId);
 
   int64_t texture_id = platform_view->texture_id();
 
