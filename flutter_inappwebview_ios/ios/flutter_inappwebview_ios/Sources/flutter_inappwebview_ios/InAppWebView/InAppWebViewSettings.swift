@@ -13,6 +13,14 @@ public class InAppWebViewSettings: ISettings<InAppWebView> {
     
     var useShouldOverrideUrlLoading = false
     var useOnLoadResource = false
+    ///When `true` (default), the `onLoadResource` events are collected and sent to Dart in batches
+    ///through a dedicated message handler instead of one generic JS-bridge call per resource.
+    ///Set it to `false` to use the legacy per-event implementation.
+    var useBatchedOnLoadResource = true
+    ///Optional filter (serialized as a dictionary, e.g. `["initiatorTypes": ["script"], "hosts": ["example.com"]]`)
+    ///applied by the batched implementation directly inside the page before buffering entries.
+    ///`nil` means no filtering.
+    var onLoadResourceBatchFilter: [String: Any?]?
     var useOnDownloadStart = false
     @available(*, deprecated, message: "Use InAppWebViewManager.clearAllCache instead.")
     var clearCache = false

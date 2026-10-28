@@ -639,7 +639,7 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
                 customSettings.pluginScriptsForMainFrameOnly));
       }
       if (customSettings.useOnLoadResource) {
-        userContentController.addPluginScript(OnLoadResourceJS.ON_LOAD_RESOURCE_JS_PLUGIN_SCRIPT(customSettings.pluginScriptsOriginAllowList,
+        userContentController.addPluginScript(OnLoadResourceJS.onLoadResourcePluginScript(getUseBatchedOnLoadResource(customSettings), customSettings.onLoadResourceBatchFilter, customSettings.pluginScriptsOriginAllowList,
                 customSettings.pluginScriptsForMainFrameOnly));
       }
       if (!customSettings.useHybridComposition) {
@@ -879,13 +879,58 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
       );
     }
 
-    if (newSettingsMap.get("useOnLoadResource") != null && customSettings.useOnLoadResource != newCustomSettings.useOnLoadResource) {
-      enablePluginScriptAtRuntime(
-              OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE(),
-              newCustomSettings.useOnLoadResource,
-              OnLoadResourceJS.ON_LOAD_RESOURCE_JS_PLUGIN_SCRIPT(customSettings.pluginScriptsOriginAllowList,
-                      customSettings.pluginScriptsForMainFrameOnly)
-      );
+    if ((newSettingsMap.get("useOnLoadResource") != null && customSettings.useOnLoadResource != newCustomSettings.useOnLoadResource)
+            || (newSettingsMap.get("useBatchedOnLoadResource") != null && customSettings.useBatchedOnLoadResource != newCustomSettings.useBatchedOnLoadResource)) {
+      if (javaScriptBridgeEnabled) {
+        boolean previousBatched = getUseBatchedOnLoadResource(customSettings);
+        boolean newBatched = getUseBatchedOnLoadResource(newCustomSettings);
+        if (customSettings.useOnLoadResource && !newCustomSettings.useOnLoadResource) {
+          // disabling: remove the currently installed variant
+          // (script is built from the old customSettings so that it matches the previously injected one)
+          enablePluginScriptAtRuntime(
+                  OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE(),
+                  false,
+                  OnLoadResourceJS.onLoadResourcePluginScript(previousBatched, customSettings.onLoadResourceBatchFilter,
+                          customSettings.pluginScriptsOriginAllowList, customSettings.pluginScriptsForMainFrameOnly)
+          );
+        } else if (newCustomSettings.useOnLoadResource) {
+          // enabling, or switching between batched/legacy implementation while keeping it enabled
+          if (customSettings.useOnLoadResource && (previousBatched != newBatched
+                  || !Util.objEquals(customSettings.onLoadResourceBatchFilter, newCustomSettings.onLoadResourceBatchFilter))) {
+            // swap: quiesce the flag so enablePluginScriptAtRuntime injects the new script,
+            // and remove the previously installed variant so future page loads use only the new one
+            evaluateJavascript("((window.top == null || window.top === window) ? window : window.top)." + OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE() + " = false;", null, null);
+            String previousGroupName = previousBatched ?
+                    OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT_GROUP_NAME :
+                    OnLoadResourceJS.ON_LOAD_RESOURCE_JS_PLUGIN_SCRIPT_GROUP_NAME;
+            if (userContentController.containsPluginScriptByGroupName(previousGroupName)) {
+              userContentController.removePluginScriptsByGroupName(previousGroupName);
+            }
+          }
+          enablePluginScriptAtRuntime(
+                  OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE(),
+                  true,
+                  OnLoadResourceJS.onLoadResourcePluginScript(newBatched, newCustomSettings.onLoadResourceBatchFilter,
+                          newCustomSettings.pluginScriptsOriginAllowList, newCustomSettings.pluginScriptsForMainFrameOnly)
+          );
+        }
+      }
+    }
+
+    if (newSettingsMap.containsKey("onLoadResourceBatchFilter")
+            && !Util.objEquals(customSettings.onLoadResourceBatchFilter, newCustomSettings.onLoadResourceBatchFilter)) {
+      if (javaScriptBridgeEnabled && newCustomSettings.useOnLoadResource && getUseBatchedOnLoadResource(newCustomSettings)) {
+        String newFilterJSON = OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_FILTER_JSON_SOURCE(newCustomSettings.onLoadResourceBatchFilter);
+        // update the filter used by the currently loaded page live
+        evaluateJavascript("window." + OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_BATCH_FILTER_JS_SOURCE() + " = " + newFilterJSON + ";", null, null);
+        // replace the installed plugin script so that future page loads use the new filter
+        if (userContentController.containsPluginScriptByGroupName(OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT_GROUP_NAME)) {
+          userContentController.removePluginScriptsByGroupName(OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT_GROUP_NAME);
+          userContentController.addPluginScript(OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT(
+                  newCustomSettings.pluginScriptsOriginAllowList, newCustomSettings.pluginScriptsForMainFrameOnly,
+                  newCustomSettings.onLoadResourceBatchFilter));
+        }
+      }
     }
 
     if (newSettingsMap.get("javaScriptCanOpenWindowsAutomatically") != null && customSettings.javaScriptCanOpenWindowsAutomatically != newCustomSettings.javaScriptCanOpenWindowsAutomatically)
@@ -1208,6 +1253,11 @@ final public class InAppWebView extends InputAwareWebView implements InAppWebVie
 
   public Map<String, Object> getCustomSettingsMap() {
     return (customSettings != null) ? customSettings.getRealSettings(this) : null;
+  }
+
+  private boolean getUseBatchedOnLoadResource(@Nullable InAppWebViewSettings settings) {
+    // null is treated as the default (true)
+    return settings == null || settings.useBatchedOnLoadResource == null || settings.useBatchedOnLoadResource;
   }
 
   public void enablePluginScriptAtRuntime(final String flagVariable,

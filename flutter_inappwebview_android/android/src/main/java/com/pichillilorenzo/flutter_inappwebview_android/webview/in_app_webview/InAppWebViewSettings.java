@@ -31,6 +31,20 @@ public class InAppWebViewSettings implements ISettings<InAppWebViewInterface> {
 
   public Boolean useShouldOverrideUrlLoading = false;
   public Boolean useOnLoadResource = false;
+  /**
+   * When {@code true} (default), the {@code onLoadResource} events are collected in the page and
+   * sent to Dart in batches instead of one generic JS-bridge call per resource.
+   * Set it to {@code false} to use the legacy per-event implementation.
+   */
+  public Boolean useBatchedOnLoadResource = true;
+  /**
+   * Filter applied by the batched {@code onLoadResource} implementation directly inside the page
+   * before resource entries are buffered and sent to Flutter, further reducing the number of messages.
+   * {@code null} (default) means no filtering.
+   * Keys: {@code initiatorTypes} (List of String), {@code hosts} (List of String).
+   */
+  @Nullable
+  public Map<String, Object> onLoadResourceBatchFilter;
   public Boolean useOnDownloadStart = false;
   /**
    * @deprecated
@@ -179,6 +193,12 @@ public class InAppWebViewSettings implements ISettings<InAppWebViewInterface> {
           break;
         case "useOnLoadResource":
           useOnLoadResource = (Boolean) value;
+          break;
+        case "useBatchedOnLoadResource":
+          useBatchedOnLoadResource = (Boolean) value;
+          break;
+        case "onLoadResourceBatchFilter":
+          onLoadResourceBatchFilter = (Map<String, Object>) value;
           break;
         case "useOnDownloadStart":
           useOnDownloadStart = (Boolean) value;
@@ -495,6 +515,8 @@ public class InAppWebViewSettings implements ISettings<InAppWebViewInterface> {
     Map<String, Object> settings = new HashMap<>();
     settings.put("useShouldOverrideUrlLoading", useShouldOverrideUrlLoading);
     settings.put("useOnLoadResource", useOnLoadResource);
+    settings.put("useBatchedOnLoadResource", useBatchedOnLoadResource);
+    settings.put("onLoadResourceBatchFilter", onLoadResourceBatchFilter);
     settings.put("useOnDownloadStart", useOnDownloadStart);
     settings.put("clearCache", clearCache);
     settings.put("userAgent", userAgent);

@@ -90,6 +90,43 @@ class InAppWebViewSettings_ {
   )
   bool? useOnLoadResource;
 
+  ///Set to `false` to use the legacy per-event implementation for the [PlatformWebViewCreationParams.onLoadResource] event,
+  ///where each loaded resource generates a single JS-bridge call.
+  ///
+  ///When `true` or `null` (default), the resources are collected in the page and sent in batches
+  ///(flushed every 150ms or immediately when >= 50 entries),
+  ///greatly reducing the per-resource overhead, especially on iOS where each event
+  ///required a full generic JS-bridge round trip (Promise + JSON + method channel + reply).
+  ///
+  ///**Note**: this option is used only if [useOnLoadResource] is `true`.
+  @SupportedPlatforms(
+    platforms: [
+      AndroidPlatform(),
+      IOSPlatform(),
+      MacOSPlatform(),
+    ],
+  )
+  bool? useBatchedOnLoadResource;
+
+  ///The filter applied by the batched implementation of the [PlatformWebViewCreationParams.onLoadResource] event
+  ///([useOnLoadResource] and [useBatchedOnLoadResource] both `true`) directly inside the page,
+  ///before the resource entries are buffered and sent to Dart.
+  ///
+  ///Use it to drop unwanted resource entries (for example, keeping only `"video"`/`"audio"` initiators
+  ///or only some hosts) and further reduce the number of messages.
+  ///The default value is `null`, which means that no filtering is applied and every resource entry is kept.
+  ///
+  ///**NOTE**: this option has no effect when [useBatchedOnLoadResource] is `false`,
+  ///because the legacy per-event implementation sends every resource immediately.
+  @SupportedPlatforms(
+    platforms: [
+      AndroidPlatform(),
+      IOSPlatform(),
+      MacOSPlatform(),
+    ],
+  )
+  OnLoadResourceBatchFilter_? onLoadResourceBatchFilter;
+
   ///Set to `true` to be able to listen at the [PlatformWebViewCreationParams.onDownloadStartRequest] event.
   ///
   ///If the [PlatformWebViewCreationParams.onDownloadStartRequest] event is implemented and this value is `null`,
@@ -3280,6 +3317,8 @@ as it can cause framerate drops on animations in Android 9 and lower (see [Hybri
   InAppWebViewSettings_({
     this.useShouldOverrideUrlLoading,
     this.useOnLoadResource,
+    this.useBatchedOnLoadResource = true,
+    this.onLoadResourceBatchFilter,
     this.useOnDownloadStart,
     @Deprecated("Use InAppWebViewController.clearAllCache instead")
     this.clearCache = false,

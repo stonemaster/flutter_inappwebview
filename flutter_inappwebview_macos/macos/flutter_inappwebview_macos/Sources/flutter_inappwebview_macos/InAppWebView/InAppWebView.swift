@@ -245,7 +245,9 @@ public class InAppWebView: WKWebView, WKUIDelegate,
                     configuration.userContentController.addPluginScript(InterceptFetchRequestJS.INTERCEPT_FETCH_REQUEST_JS_PLUGIN_SCRIPT(allowedOriginRules: pluginScriptsOriginAllowList, forMainFrameOnly: pluginScriptsForMainFrameOnly))
                 }
                 if settings.useOnLoadResource {
-                    configuration.userContentController.addPluginScript(OnLoadResourceJS.ON_LOAD_RESOURCE_JS_PLUGIN_SCRIPT(allowedOriginRules: pluginScriptsOriginAllowList, forMainFrameOnly: pluginScriptsForMainFrameOnly))
+                    configuration.userContentController.addPluginScript(OnLoadResourceJS.onLoadResourcePluginScript(settings: settings,
+                                                                                                                    allowedOriginRules: pluginScriptsOriginAllowList,
+                                                                                                                    forMainFrameOnly: pluginScriptsForMainFrameOnly))
                 }
                 if !settings.supportZoom {
                     configuration.userContentController.addPluginScript(SupportZoomJS.NOT_SUPPORT_ZOOM_JS_PLUGIN_SCRIPT(allowedOriginRules: pluginScriptsOriginAllowList))
@@ -607,12 +609,57 @@ public class InAppWebView: WKWebView, WKUIDelegate,
             }
         }
         
-        if newSettingsMap["useOnLoadResource"] != nil && settings?.useOnLoadResource != newSettings.useOnLoadResource {
+        if (newSettingsMap["useOnLoadResource"] != nil && settings?.useOnLoadResource != newSettings.useOnLoadResource) ||
+            (newSettingsMap["useBatchedOnLoadResource"] != nil && settings?.useBatchedOnLoadResource != newSettings.useBatchedOnLoadResource) {
             if javaScriptBridgeEnabled {
-                enablePluginScriptAtRuntime(flagVariable: OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE(),
-                                            enable: newSettings.useOnLoadResource,
-                                            pluginScript: OnLoadResourceJS.ON_LOAD_RESOURCE_JS_PLUGIN_SCRIPT(allowedOriginRules: newSettings.pluginScriptsOriginAllowList,
-                                                                                                             forMainFrameOnly: newSettings.pluginScriptsForMainFrameOnly))
+                let previousSettings = settings ?? newSettings
+                if previousSettings.useOnLoadResource && !newSettings.useOnLoadResource {
+                    // disabling: remove the currently installed variant
+                    enablePluginScriptAtRuntime(flagVariable: OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE(),
+                                                enable: false,
+                                                pluginScript: OnLoadResourceJS.onLoadResourcePluginScript(settings: previousSettings,
+                                                                                                          allowedOriginRules: newSettings.pluginScriptsOriginAllowList,
+                                                                                                          forMainFrameOnly: newSettings.pluginScriptsForMainFrameOnly))
+                    configuration.userContentController.removeScriptMessageHandler(forName: OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_MESSAGE_HANDLER_NAME)
+                } else if newSettings.useOnLoadResource {
+                    // enabling, or switching between batched/legacy implementation while keeping it enabled
+                    if previousSettings.useOnLoadResource {
+                        // swap: quiesce the flag so enablePluginScriptAtRuntime injects the new script,
+                        // and remove the previously installed variant so future page loads use only the new one
+                        evaluateJavaScript("\(OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE()) = false;", completionHandler: nil)
+                        let previousScript = OnLoadResourceJS.onLoadResourcePluginScript(settings: previousSettings,
+                                                                                         allowedOriginRules: nil, forMainFrameOnly: false)
+                        if let previousGroupName = previousScript.groupName,
+                           configuration.userContentController.containsPluginScript(with: previousGroupName) {
+                            configuration.userContentController.removePluginScripts(with: previousGroupName)
+                        }
+                        configuration.userContentController.removeScriptMessageHandler(forName: OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_MESSAGE_HANDLER_NAME)
+                    }
+                    enablePluginScriptAtRuntime(flagVariable: OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_JS_SOURCE(),
+                                                enable: true,
+                                                pluginScript: OnLoadResourceJS.onLoadResourcePluginScript(settings: newSettings,
+                                                                                                          allowedOriginRules: newSettings.pluginScriptsOriginAllowList,
+                                                                                                          forMainFrameOnly: newSettings.pluginScriptsForMainFrameOnly))
+                }
+            }
+        }
+        
+        if newSettingsMap.keys.contains("onLoadResourceBatchFilter") {
+            let oldFilterJSON = OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_FILTER_JSON_SOURCE(filter: settings?.onLoadResourceBatchFilter)
+            let newFilterJSON = OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_FILTER_JSON_SOURCE(filter: newSettings.onLoadResourceBatchFilter)
+            if oldFilterJSON != newFilterJSON {
+                if javaScriptBridgeEnabled, newSettings.useOnLoadResource, newSettings.useBatchedOnLoadResource {
+                    // update the filter used by the currently loaded page live
+                    evaluateJavaScript("\(OnLoadResourceJS.FLAG_VARIABLE_FOR_ON_LOAD_RESOURCE_BATCH_FILTER_JS_SOURCE()) = \(newFilterJSON);", completionHandler: nil)
+                    // replace the installed plugin script so that future page loads use the new filter
+                    if configuration.userContentController.containsPluginScript(with: OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT_GROUP_NAME) {
+                        configuration.userContentController.removePluginScripts(with: OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT_GROUP_NAME)
+                        configuration.userContentController.addPluginScript(OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT(allowedOriginRules: newSettings.pluginScriptsOriginAllowList,
+                                                                                                                                    forMainFrameOnly: newSettings.pluginScriptsForMainFrameOnly,
+                                                                                                                                    filter: newSettings.onLoadResourceBatchFilter))
+                        configuration.userContentController.sync(scriptMessageHandler: self)
+                    }
+                }
             }
         }
         
@@ -2164,11 +2211,6 @@ public class InAppWebView: WKWebView, WKUIDelegate,
             return
         }
         
-        guard let bridgeSecret = body["_bridgeSecret"] as? String, bridgeSecret == exceptedBridgeSecret else {
-            print("Bridge access attempt with wrong secret token, possibly from malicious code from origin \(message.frameInfo.securityOrigin)")
-            return
-        }
-        
         var sourceOrigin: URL? = nil
         let securityOrigin = message.frameInfo.securityOrigin
         let scheme = securityOrigin.protocol
@@ -2192,6 +2234,40 @@ public class InAppWebView: WKWebView, WKUIDelegate,
         } else {
             // origin is by default allowed if the allow list is null
             isOriginAllowed = true
+        }
+        
+        // Dedicated handler used by OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_PLUGIN_SCRIPT.
+        // The batched entries are forwarded to Dart in a single method channel call:
+        // no _bridgeSecret, no _callHandlerID, no Promise and no evaluateJavaScript reply.
+        if message.name == OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_MESSAGE_HANDLER_NAME {
+            if !isOriginAllowed {
+                print("Bridge access attempt from an origin not allowed: \(message.frameInfo.securityOrigin)")
+                return
+            }
+            if let batch = body["batch"] as? [[String: Any]], !batch.isEmpty,
+               let jsonData = try? JSONSerialization.data(withJSONObject: [batch]),
+               let args = String(data: jsonData, encoding: .utf8) {
+                let _windowId = body["_windowId"] as? Int64
+                var webView = self
+                if let wId = _windowId, let webViewTransport = plugin?.inAppWebViewManager?.windowWebViews[wId] {
+                    webView = webViewTransport.webView
+                }
+                if let channelDelegate = webView.channelDelegate {
+                    let data = JavaScriptHandlerFunctionData(
+                        args: args, isMainFrame: message.frameInfo.isMainFrame,
+                        origin: sourceOrigin?.absoluteString ?? "",
+                        requestUrl: requestUrl?.absoluteString ?? ""
+                    )
+                    let callback = WebViewChannelDelegate.CallJsHandlerCallback()
+                    channelDelegate.onCallJsHandler(handlerName: OnLoadResourceJS.ON_LOAD_RESOURCE_BATCH_JS_MESSAGE_HANDLER_NAME, data: data, callback: callback)
+                }
+            }
+            return
+        }
+        
+        guard let bridgeSecret = body["_bridgeSecret"] as? String, bridgeSecret == exceptedBridgeSecret else {
+            print("Bridge access attempt with wrong secret token, possibly from malicious code from origin \(message.frameInfo.securityOrigin)")
+            return
         }
         
         if !isOriginAllowed {

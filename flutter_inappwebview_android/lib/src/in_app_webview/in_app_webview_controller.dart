@@ -1644,6 +1644,36 @@ class AndroidInAppWebViewController extends PlatformInAppWebViewController
                 _inAppBrowserEventHandler!.onLoadResource(response);
             }
             return null;
+          case "onLoadResourceBatched":
+            // Sent by the batched OnLoadResourceJS plugin script:
+            // a single call carrying many resources, decoded once here.
+            // Same user-facing behavior as the "onLoadResource" case above.
+            if ((webviewParams != null &&
+                    webviewParams!.onLoadResource != null) ||
+                _inAppBrowserEventHandler != null) {
+              List<dynamic> batch = handlerData.args[0];
+              for (dynamic entry in batch) {
+                Map<String, dynamic> arguments = entry.cast<String, dynamic>();
+                arguments["startTime"] = arguments["startTime"] is int
+                    ? arguments["startTime"].toDouble()
+                    : arguments["startTime"];
+                arguments["duration"] = arguments["duration"] is int
+                    ? arguments["duration"].toDouble()
+                    : arguments["duration"];
+
+                var response = LoadedResource.fromMap(arguments)!;
+
+                if (webviewParams != null &&
+                    webviewParams!.onLoadResource != null)
+                  webviewParams!.onLoadResource!(
+                    _controllerFromPlatform,
+                    response,
+                  );
+                else
+                  _inAppBrowserEventHandler!.onLoadResource(response);
+              }
+            }
+            return null;
           case "shouldInterceptAjaxRequest":
             if ((webviewParams != null &&
                     webviewParams!.shouldInterceptAjaxRequest != null) ||
