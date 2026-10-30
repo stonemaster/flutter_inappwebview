@@ -113,7 +113,17 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
                 // always be 0.
                 //
                 // Fix: don't adjust content inset in fullscreen as it moves the WebView content.
-                if (scrollView.adjustedContentInset != .zero && !inFullscreen) {
+                //
+                // The `inFullscreen` flag covers the AVKit *video* fullscreen path, but for
+                // *element* fullscreen (e.g. `container.requestFullscreen()` on video.js /
+                // tagesschau players) WebKit RE-parents this WKWebView into its own
+                // fullscreen UIWindow ("WKFullScreenWindowControllerIOS" sets
+                // `windowLevel = UIWindowLevelNormal - 1` and `[webView
+                // setFrame:[_window bounds]]`) before any visibility notification fires
+                // and while `WKWebView.fullscreenState` KVO is unreliable (iOS 26). In that
+                // state the negative insets would expand the layout viewport beyond the
+                // screen and shift the fullscreen content toward the display cutout.
+                if (scrollView.adjustedContentInset != .zero && !inFullscreen && !isInElementFullscreenWindow()) {
                     let insetToAdjust = scrollView.adjustedContentInset
                     scrollView.contentInset = UIEdgeInsets(top: -insetToAdjust.top, left: -insetToAdjust.left,
                                                            bottom: -insetToAdjust.bottom, right: -insetToAdjust.right)
@@ -2896,6 +2906,39 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
 //    }
     
     
+    /// True when this WKWebView itself sits in WebKit's *element fullscreen* window
+    /// (the presentation path for `element.requestFullscreen()` on a container, e.g.
+    /// video.js / tagesschau players, when `isElementFullscreenEnabled` is on): WebKit
+    /// re-parents the WKWebView into a fresh full-screen `UIWindow` of our own window
+    /// scene at level `UIWindowLevelNormal - 1` (WebKit
+    /// "WKFullScreenWindowControllerIOS"). Neither the `fullscreenState` KVO (element
+    /// fullscreen only, unreliable on iOS 26) nor the UIWindow visibility heuristics in
+    /// [isFullscreenMediaWindow] observe this reparenting itself — so callers use this
+    /// geometric check to suppress layout hacks, above all the negative contentInset
+    /// compensation in the frame setter.
+    private func isInElementFullscreenWindow() -> Bool {
+        guard let window = self.window else {
+            return false
+        }
+        // AVKit video fullscreen windows are already detected via the visibility
+        // notifications and their level is far above `.normal`; only the
+        // element fullscreen window sits just below it.
+        guard window.windowLevel < .normal else {
+            return false
+        }
+        let isFullScreenSize: Bool
+        if #available(iOS 13.0, *), let windowScene = window.windowScene {
+            let sceneBounds = windowScene.coordinateSpace.bounds
+            isFullScreenSize = window.bounds.width >= sceneBounds.width * 0.9 &&
+                               window.bounds.height >= sceneBounds.height * 0.9
+        } else {
+            let screenBounds = UIScreen.main.bounds
+            isFullScreenSize = window.bounds.width >= screenBounds.width * 0.9 &&
+                               window.bounds.height >= screenBounds.height * 0.9
+        }
+        return isFullScreenSize
+    }
+
     /// Determines if the window notification is likely for a fullscreen video/media presentation
     /// that originated from THIS specific WebView instance.
     /// Uses heuristics based on window properties rather than private class names to avoid App Store rejection.
@@ -2918,15 +2961,29 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
             }
         }
         
-        let screenBounds = UIScreen.main.bounds
+        // Prefer the window scene's coordinate space over `UIScreen.main.bounds`:
+        // `UIScreen.main` can disagree with the scene geometry (and is deprecated);
+        // the fullscreen windows we look for are always in our scene.
+        let screenBounds: CGRect
+        if #available(iOS 13.0, *) {
+            screenBounds = myWindow.windowScene?.coordinateSpace.bounds ?? UIScreen.main.bounds
+        } else {
+            screenBounds = UIScreen.main.bounds
+        }
         let windowFrame = fullscreenWindow.frame
         
         // Check if the window is full screen or close to it (allowing small margins)
         let isFullScreenSize = windowFrame.width >= screenBounds.width * 0.9 &&
                                windowFrame.height >= screenBounds.height * 0.9
         
-        // Fullscreen video windows typically have an elevated window level
-        let hasElevatedWindowLevel = fullscreenWindow.windowLevel >= .normal
+        // Element fullscreen reparents the WebView into a fresh window of our window
+        // scene whose level is `UIWindowLevelNormal - 1` ("WKFullScreenWindowControllerIOS",
+        // WebKit); AVKit video fullscreen windows (PGHostedWindow / VideoPresentationInterfaceIOS)
+        // sit higher (textEffectsWindowLevel - 1). Do not require a level >= .normal since
+        // the element fullscreen window would then never be detected — also note this
+        // heuristic must not reference private WebKit type names (see plugin issue #2754,
+        // App Store Guideline 2.5.1).
+        let isFullscreenWindowLevel = fullscreenWindow.windowLevel >= .normal - 1
         
         // Exclude obvious non-media windows by checking type description
         let windowTypeDescription = NSStringFromClass(type(of: fullscreenWindow))
@@ -2944,7 +3001,7 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         // 1. Must be fullscreen size
         // 2. Must have elevated window level (typical for video fullscreen overlays)
         // 3. Should be in the same window scene
-        return isFullScreenSize && hasElevatedWindowLevel
+        return isFullScreenSize && isFullscreenWindowLevel
     }
     
     /// Disables the contentInset-compensation hack (contentInset = -adjustedContentInset)
