@@ -12,7 +12,12 @@ let package = Package(
         .library(name: "flutter-inappwebview-macos", targets: ["flutter_inappwebview_macos"])
     ],
     dependencies: [
-      .package(url: "https://github.com/apple/swift-collections.git", from: "1.2.1")
+      // Upper-bounded to exclude swift-collections 1.3+: 1.7.x uses the new
+      // noncopyable `Iterable` protocol (and `Failure` associated type) that
+      // the prebuilt stdlib modules shipped in current xcross Darwin SDKs
+      // (built by Apple Swift 6.3.x) do not expose, breaking cross builds
+      // from Linux. Real Xcode toolchains also compile 1.2.x fine.
+      .package(url: "https://github.com/apple/swift-collections.git", "1.2.1"..<"1.3.0")
     ],
     targets: [
         .target(

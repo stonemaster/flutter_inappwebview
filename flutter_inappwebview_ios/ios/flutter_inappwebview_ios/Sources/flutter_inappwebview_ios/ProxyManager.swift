@@ -11,6 +11,29 @@ import Flutter
 public class ProxyManager: ChannelDelegate {
     static let METHOD_CHANNEL_NAME = "com.pichillilorenzo/flutter_inappwebview_proxycontroller"
 
+    /// Inert oblivious-HTTP config appended to every proxy stack, making
+    /// WebKit drop its existing sessions and connection pools on the
+    /// change — see https://bugs.webkit.org/show_bug.cgi?id=316948 (and
+    /// comment on `applyProxyConfigurations`).
+    ///
+    /// WebKit only recreates sessions when some stack entry requires HTTP
+    /// protocols (`nw_proxy_config_stack_requires_http_protocols`), and
+    /// only `nw_proxy_config_create_oblivious_http` entries satisfy that.
+    /// Routing is unaffected: relay host and match domain are both
+    /// unresolvable `.invalid` names.
+    static let sessionRecreateTrigger: ProxyConfiguration = {
+        let relay = ProxyConfiguration.RelayHop(
+            http2RelayEndpoint: .url(URL(string: "https://unused-relay.invalid/")!)
+        )
+        let trigger = ProxyConfiguration(
+            obliviousHTTPRelay: relay,
+            relayResourcePath: "/gateway",
+            gatewayKeyConfig: Data(count: 8),
+            matchDomains: ["unused-match.invalid"]
+        )
+        return trigger
+    }()
+
     private var plugin: InAppWebViewFlutterPlugin?
 
     init(plugin: InAppWebViewFlutterPlugin) {
@@ -41,14 +64,43 @@ public class ProxyManager: ChannelDelegate {
     }
     
     public func setProxyOverride(_ settings: ProxySettings) {
-        let proxyConfigurations = settings.toProxyConfigurations()
-        WKWebsiteDataStore.default().proxyConfigurations = proxyConfigurations
-        WKWebsiteDataStore.nonPersistent().proxyConfigurations = proxyConfigurations
+        applyProxyConfigurations(settings.toProxyConfigurations())
     }
-    
+
     public func clearProxyOverride() {
-        WKWebsiteDataStore.default().proxyConfigurations = []
-        WKWebsiteDataStore.nonPersistent().proxyConfigurations = []
+        applyProxyConfigurations([])
+    }
+
+    /// Assigns `proxyConfigurations` on the stores shared by all webviews of
+    /// the app, always appending an inert session-recreate trigger entry.
+    ///
+    /// WebKit bug 316948: assigning `proxyConfigurations` on a data store
+    /// that is already in use does not tear down the network sessions and
+    /// per-host connection pools already kept for that store — pools are
+    /// keyed to the data store, not the web view, so they survive webview
+    /// teardown too. That bites this embedder's use case of toggling a Tor
+    /// proxy on localhost: after tunnel shutdown the cleared configuration
+    /// leaves stale pooled connections through the (now dead)
+    /// 127.0.0.1:<port> endpoint behind, and the webview can get stuck in a
+    /// state where navigation keeps failing (CANNOT_CONNECT_TO_HOST) even
+    /// though a fresh load would have picked up the cleared (direct)
+    /// configuration. The same holds in the opposite direction: hosts with
+    /// pooled direct connections bypass a newly set proxy.
+    ///
+    /// WebKit only discards existing sessions and connection pools when the
+    /// assigned proxy stack contains an oblivious-HTTP entry, so — like
+    /// Firefox iOS — every transition always appends the inert
+    /// `sessionRecreateTrigger` below to force a clean release of stale
+    /// pool state before the fresh configuration takes over.
+    ///
+    /// Caveat: with webviews alive this can cancel loads in flight while
+    /// their old session is discarded; the embedder surfaces those as
+    /// ordinary (retriable) navigation errors.
+    private func applyProxyConfigurations(_ configurations: [ProxyConfiguration]) {
+        var stack = configurations
+        stack.append(ProxyManager.sessionRecreateTrigger)
+        WKWebsiteDataStore.default().proxyConfigurations = stack
+        WKWebsiteDataStore.nonPersistent().proxyConfigurations = stack
     }
 
     public override func dispose() {
