@@ -67,6 +67,39 @@ extension WKUserContentController {
         ]
     }
 
+    /// Whether the emulated stored properties (`pluginScripts`, `userOnlyScripts`
+    /// and, on iOS 14+, `contentWorlds`) have been created for this instance.
+    ///
+    /// The bookkeeping lives in static dictionaries keyed by this instance's
+    /// memory address (the stored-properties-in-extension workaround at the
+    /// top of this file) and is dropped by `dispose(windowId: nil)`. A
+    /// `WKUserContentController`, however, can outlive the `InAppWebView` that
+    /// disposed it: window webviews (`windowId != nil`, created for
+    /// `window.open`) share the opener's `WKWebViewConfiguration` and therefore
+    /// the very same userContentController object. Once the opener has been
+    /// disposed, a still-alive window webview reads empty maps here, and every
+    /// force-unwrapped map access in the methods below would trap at runtime
+    /// (EXC_BREAKPOINT; observed when a popup tab outlived its opener tab and
+    /// an `addUserScript`/`removeUserScript` method call arrived afterwards).
+    var hasBookkeeping: Bool {
+        let tmpAddress = String(format: "%p", unsafeBitCast(self, to: Int.self))
+        return WKUserContentController._userOnlyScripts[tmpAddress] != nil
+    }
+
+    /// Lazily (re-)creates the bookkeeping if it is missing for this instance.
+    ///
+    /// Called by every mutating entry point below so they never force-unwrap
+    /// an empty map. Regular webviews are always initialized in
+    /// `prepareAndAddUserScripts()`, so this is a no-op for them; it only
+    /// kicks in for window webviews whose opener (sharing this controller)
+    /// has been disposed in the meantime.
+    public func ensureInitialized () {
+        if hasBookkeeping {
+            return
+        }
+        initialize()
+    }
+
     public func dispose (windowId: Int64?) {
         if windowId == nil {
             let tmpAddress = String(format: "%p", unsafeBitCast(self, to: Int.self))
@@ -121,6 +154,7 @@ extension WKUserContentController {
     }
 
     public func addUserOnlyScript(_ userOnlyScript: UserScript) {
+        ensureInitialized()
         if #available(iOS 14.0, *) {
             contentWorlds.insert(userOnlyScript.contentWorld)
         }
@@ -134,6 +168,7 @@ extension WKUserContentController {
     }
 
     public func addPluginScript(_ pluginScript: PluginScript) {
+        ensureInitialized()
         if #available(iOS 14.0, *) {
             contentWorlds.insert(pluginScript.contentWorld)
         }
@@ -174,17 +209,26 @@ extension WKUserContentController {
     }
 
     public func removeUserOnlyScript(_ userOnlyScript: UserScript) {
+        ensureInitialized()
         userOnlyScripts[userOnlyScript.injectionTime]!.remove(userOnlyScript)
         removeUserScript(scriptToRemove: userOnlyScript)
     }
 
     public func removeUserOnlyScript(at index: Int, injectionTime: WKUserScriptInjectionTime) {
-        let scriptToRemove = userOnlyScripts[injectionTime]![index]
+        ensureInitialized()
+        let scripts = userOnlyScripts[injectionTime]!
+        guard index >= 0, index < scripts.count else {
+            // The bookkeeping was (re-)initialized after a dispose dropped it:
+            // the requested script is unknown to this controller, nothing to remove.
+            return
+        }
+        let scriptToRemove = scripts[index]
         userOnlyScripts[injectionTime]!.remove(at: index)
         removeUserScript(scriptToRemove: scriptToRemove)
     }
 
     public func removeAllUserOnlyScripts() {
+        ensureInitialized()
         let allUserOnlyScripts = Array(userOnlyScripts.compactMap({ $0.value }).joined())
 
         userOnlyScripts[.atDocumentStart]!.removeAll()
@@ -194,6 +238,7 @@ extension WKUserContentController {
     }
 
     public func removePluginScript(_ pluginScript: PluginScript) {
+        ensureInitialized()
         pluginScripts[pluginScript.injectionTime]!.remove(pluginScript)
         for messageHandlerName in pluginScript.messageHandlerNames {
             removeScriptMessageHandler(forName: messageHandlerName)
@@ -207,6 +252,7 @@ extension WKUserContentController {
     }
 
     public func removeAllPluginScripts() {
+        ensureInitialized()
         let allPluginScripts = Array(pluginScripts.compactMap({ $0.value }).joined())
 
         pluginScripts[.atDocumentStart]!.removeAll()
@@ -291,6 +337,7 @@ extension WKUserContentController {
     }
 
     public func removeUserOnlyScripts(with groupName: String, shouldAddPreviousScripts: Bool = true) -> Void {
+        ensureInitialized()
         let allUserOnlyScripts = userOnlyScripts.compactMap({ $0.value }).joined()
         var scriptsToRemove: [UserScript] = []
         for script in allUserOnlyScripts {
@@ -303,6 +350,7 @@ extension WKUserContentController {
     }
 
     public func removePluginScripts(with groupName: String, shouldAddPreviousScripts: Bool = true) -> Void {
+        ensureInitialized()
         let allPluginScripts = pluginScripts.compactMap({ $0.value }).joined()
         var scriptsToRemove: [PluginScript] = []
         for script in allPluginScripts {
