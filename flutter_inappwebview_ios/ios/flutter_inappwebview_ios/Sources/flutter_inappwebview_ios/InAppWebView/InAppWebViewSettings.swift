@@ -83,6 +83,10 @@ public class InAppWebViewSettings: ISettings<InAppWebView> {
     var disableLongPressContextMenuOnLinks = false
     var disableInputAccessoryView = false
     var underPageBackgroundColor: String?
+    ///Pins the interface style (`UIUserInterfaceStyle`) of the web view, overriding the system-wide appearance only for it.
+    ///Accepted values are `"light"`, `"dark"` and `"system"`. `nil` or `"system"` means that the web view
+    ///follows the system appearance (`UIUserInterfaceStyle.unspecified`).
+    var userInterfaceStyle: String?
     var isTextInteractionEnabled = true
     var isSiteSpecificQuirksModeEnabled = true
     var upgradeKnownHostsToHTTPS = true
@@ -133,6 +137,7 @@ public class InAppWebViewSettings: ISettings<InAppWebView> {
         if let webView = obj {
             realSettings["isUserInteractionEnabled"] = webView.isUserInteractionEnabled
             realSettings["alpha"] = Double(webView.alpha)
+            realSettings["userInterfaceStyle"] = Util.getUserInterfaceStyleString(style: webView.overrideUserInterfaceStyle)
             let configuration = webView.configuration
             if #available(iOS 9.0, *) {
                 realSettings["userAgent"] = webView.customUserAgent

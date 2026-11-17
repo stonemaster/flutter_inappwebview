@@ -1995,6 +1995,30 @@ as it can cause framerate drops on animations in Android 9 and lower (see [Hybri
   )
   Color_? underPageBackgroundColor;
 
+  ///The interface style of the web view, overriding the system-wide appearance only for it.
+  ///
+  ///Accepted values are `"light"`, `"dark"` and `"system"`.
+  ///When `null` (default) or `"system"`, the web view follows the system appearance
+  ///(equivalent to `UIUserInterfaceStyle.unspecified`); any other value is treated as `"system"`.
+  ///
+  ///This setting controls the `prefers-color-scheme` media query of the loaded page and,
+  ///once changed, is applied live without needing a page reload:
+  ///WebKit re-evaluates the appearance-related media queries when the trait changes.
+  ///
+  ///**NOTE**: this setting affects only the appearance of the web view and of its content,
+  ///not the one of the rest of the app.
+  @SupportedPlatforms(
+    platforms: [
+      IOSPlatform(
+        available: "12.0",
+        apiName: "UIView.overrideUserInterfaceStyle",
+        apiUrl:
+            "https://developer.apple.com/documentation/uikit/uiview/overrideuserinterfacestyle",
+      ),
+    ],
+  )
+  String? userInterfaceStyle;
+
   ///A Boolean value indicating whether text interaction is enabled or not.
   ///The default value is `true`.
   @SupportedPlatforms(
@@ -3445,6 +3469,7 @@ as it can cause framerate drops on animations in Android 9 and lower (see [Hybri
     this.disableLongPressContextMenuOnLinks = false,
     this.disableInputAccessoryView = false,
     this.underPageBackgroundColor,
+    this.userInterfaceStyle,
     this.isTextInteractionEnabled = true,
     this.isSiteSpecificQuirksModeEnabled = true,
     this.upgradeKnownHostsToHTTPS = true,

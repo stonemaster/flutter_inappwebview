@@ -386,6 +386,23 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         }
     }
 
+    ///Applies the `userInterfaceStyle` setting, pinning the web view's interface style
+    ///(`overrideUserInterfaceStyle`) to light or dark, or letting it follow the system appearance (`.unspecified`).
+    ///This drives the page's `prefers-color-scheme` media query and it is applied live, without needing a reload:
+    ///WebKit re-evaluates the appearance media queries when the trait changes.
+    ///
+    ///**Note**: the scroll view's `indicatorStyle` doesn't follow `overrideUserInterfaceStyle` reliably
+    ///(regression since iOS 15.4), so it's set explicitly here. For the "system" case it's left untouched.
+    func applyUserInterfaceStyle(_ userInterfaceStyle: String?) {
+        let style = Util.getUserInterfaceStyle(string: userInterfaceStyle)
+        overrideUserInterfaceStyle = style
+        if style == .light {
+            scrollView.indicatorStyle = .default
+        } else if style == .dark {
+            scrollView.indicatorStyle = .white
+        }
+    }
+
     public func prepare() {
         if #available(iOS 17.2, *) {
             // Fix https://github.com/pichillilorenzo/flutter_inappwebview/issues/1947
@@ -543,6 +560,8 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
                     self.underPageBackgroundColor = UIColor(hexString: underPageBackgroundColor)
                 }
             }
+            
+            applyUserInterfaceStyle(settings.userInterfaceStyle)
             
             if #available(iOS 15.5, *) {
                 if let minViewportInset = settings.minimumViewportInset, let maxViewportInset = settings.maximumViewportInset {
@@ -1452,6 +1471,11 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
                let underPageBackgroundColor = newSettings.underPageBackgroundColor, !underPageBackgroundColor.isEmpty {
                 self.underPageBackgroundColor = UIColor(hexString: underPageBackgroundColor)
             }
+        }
+        // NOTE: unlike the other settings, also the reset case must be handled here, so that
+        // switching from "light"/"dark" to null/"system" restores UIUserInterfaceStyle.unspecified.
+        if newSettingsMap["userInterfaceStyle"] != nil, settings?.userInterfaceStyle != newSettings.userInterfaceStyle {
+            applyUserInterfaceStyle(newSettings.userInterfaceStyle)
         }
         if #available(iOS 15.4, *) {
             if newSettingsMap["isSiteSpecificQuirksModeEnabled"] != nil, settings?.isSiteSpecificQuirksModeEnabled != newSettings.isSiteSpecificQuirksModeEnabled {

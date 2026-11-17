@@ -150,6 +150,29 @@ public class Util {
         }
     }
     
+    public static func getUserInterfaceStyle(string: String?) -> UIUserInterfaceStyle {
+        switch (string ?? "").lowercased() {
+            case "light":
+                return .light
+            case "dark":
+                return .dark
+            default:
+                // nil, "system" or any unknown value means "follow the system appearance"
+                return .unspecified
+        }
+    }
+    
+    public static func getUserInterfaceStyleString(style: UIUserInterfaceStyle) -> String {
+        switch style {
+            case .light:
+                return "light"
+            case .dark:
+                return "dark"
+            default:
+                return "system"
+        }
+    }
+    
     public static func isIPv4(address: String) -> Bool {
         var sin = sockaddr_in()
         return address.withCString({ cstring in inet_pton(AF_INET, cstring, &sin.sin_addr) }) == 1
