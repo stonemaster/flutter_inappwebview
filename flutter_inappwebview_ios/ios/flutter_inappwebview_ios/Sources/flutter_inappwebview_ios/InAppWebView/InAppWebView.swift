@@ -394,12 +394,14 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     ///**Note**: the scroll view's `indicatorStyle` doesn't follow `overrideUserInterfaceStyle` reliably
     ///(regression since iOS 15.4), so it's set explicitly here. For the "system" case it's left untouched.
     func applyUserInterfaceStyle(_ userInterfaceStyle: String?) {
-        let style = Util.getUserInterfaceStyle(string: userInterfaceStyle)
-        overrideUserInterfaceStyle = style
-        if style == .light {
-            scrollView.indicatorStyle = .default
-        } else if style == .dark {
-            scrollView.indicatorStyle = .white
+        if #available(iOS 13.0, *) {
+            let style = Util.getUserInterfaceStyle(string: userInterfaceStyle)
+            overrideUserInterfaceStyle = style
+            if style == .light {
+                scrollView.indicatorStyle = .default
+            } else if style == .dark {
+                scrollView.indicatorStyle = .white
+            }
         }
     }
 

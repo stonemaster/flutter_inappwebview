@@ -150,6 +150,7 @@ public class Util {
         }
     }
     
+    @available(iOS 13.0, *)
     public static func getUserInterfaceStyle(string: String?) -> UIUserInterfaceStyle {
         switch (string ?? "").lowercased() {
             case "light":
@@ -162,6 +163,7 @@ public class Util {
         }
     }
     
+    @available(iOS 13.0, *)
     public static func getUserInterfaceStyleString(style: UIUserInterfaceStyle) -> String {
         switch style {
             case .light:

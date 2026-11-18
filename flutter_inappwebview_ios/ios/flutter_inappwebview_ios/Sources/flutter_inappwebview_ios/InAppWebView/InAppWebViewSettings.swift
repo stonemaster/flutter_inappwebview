@@ -137,7 +137,9 @@ public class InAppWebViewSettings: ISettings<InAppWebView> {
         if let webView = obj {
             realSettings["isUserInteractionEnabled"] = webView.isUserInteractionEnabled
             realSettings["alpha"] = Double(webView.alpha)
-            realSettings["userInterfaceStyle"] = Util.getUserInterfaceStyleString(style: webView.overrideUserInterfaceStyle)
+            if #available(iOS 13.0, *) {
+                realSettings["userInterfaceStyle"] = Util.getUserInterfaceStyleString(style: webView.overrideUserInterfaceStyle)
+            }
             let configuration = webView.configuration
             if #available(iOS 9.0, *) {
                 realSettings["userAgent"] = webView.customUserAgent
