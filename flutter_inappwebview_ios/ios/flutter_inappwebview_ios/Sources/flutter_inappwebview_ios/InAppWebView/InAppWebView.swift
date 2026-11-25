@@ -107,23 +107,42 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
         set {
             super.frame = newValue
             
+            if isInElementFullscreenWindow() {
+                // In element fullscreen (`element.requestFullscreen()`, e.g. video.js /
+                // tagesschau players when `isElementFullscreenEnabled` is on), WebKit
+                // re-parents this WKWebView into its own fullscreen UIWindow and resets
+                // `WKScrollView`'s `contentInsetAdjustmentBehavior` back to `.automatic`
+                // via `WKWebViewState().applyTo(webView)` (`_resetScrollViewInsetAdjustmentBehavior`),
+                // clearing `_contentInsetAdjustmentBehaviorWasExternallyOverridden`.
+                //
+                // With `.automatic` (or `.always`), `WKWebView.activeViewLayoutSize`
+                // subtracts `_scrollViewSystemContentInset` (the window's safeAreaInsets,
+                // e.g. ~59pt at the notch/Dynamic Island in landscape) from the layout
+                // viewport width, AND `UIScrollView` shifts `contentOffset.x` by
+                // `-safeAreaInsets.left`, while the fullscreen view spans the full
+                // screen. That leaves the fullscreen element sized to the safe area width
+                // and left-aligned into the notch with a black band on the trailing side.
+                //
+                // Re-asserting the configured `contentInsetAdjustmentBehavior` (default
+                // `.never`) sets `_contentInsetAdjustmentBehaviorWasExternallyOverridden = YES`
+                // on `WKScrollView`, so WebKit keeps `_scrollViewSystemContentInset = .zero`
+                // and lays out the fullscreen element across the full screen bounds.
+                if #available(iOS 11, *) {
+                    let rawBehavior = settings?.contentInsetAdjustmentBehavior ?? UIScrollView.ContentInsetAdjustmentBehavior.never.rawValue
+                    let behavior = UIScrollView.ContentInsetAdjustmentBehavior(rawValue: rawBehavior) ?? .never
+                    scrollView.contentInsetAdjustmentBehavior = behavior
+                }
+                scrollView.contentInset = .zero
+                return
+            }
+            
             scrollView.contentInset = .zero
             if #available(iOS 11, *) {
                 // Above iOS 11, adjust contentInset to compensate the adjustedContentInset so the sum will
                 // always be 0.
                 //
                 // Fix: don't adjust content inset in fullscreen as it moves the WebView content.
-                //
-                // The `inFullscreen` flag covers the AVKit *video* fullscreen path, but for
-                // *element* fullscreen (e.g. `container.requestFullscreen()` on video.js /
-                // tagesschau players) WebKit RE-parents this WKWebView into its own
-                // fullscreen UIWindow ("WKFullScreenWindowControllerIOS" sets
-                // `windowLevel = UIWindowLevelNormal - 1` and `[webView
-                // setFrame:[_window bounds]]`) before any visibility notification fires
-                // and while `WKWebView.fullscreenState` KVO is unreliable (iOS 26). In that
-                // state the negative insets would expand the layout viewport beyond the
-                // screen and shift the fullscreen content toward the display cutout.
-                if (scrollView.adjustedContentInset != .zero && !inFullscreen && !isInElementFullscreenWindow()) {
+                if (scrollView.adjustedContentInset != .zero && !inFullscreen) {
                     let insetToAdjust = scrollView.adjustedContentInset
                     scrollView.contentInset = UIEdgeInsets(top: -insetToAdjust.top, left: -insetToAdjust.left,
                                                            bottom: -insetToAdjust.bottom, right: -insetToAdjust.right)
@@ -2936,20 +2955,30 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     /// (the presentation path for `element.requestFullscreen()` on a container, e.g.
     /// video.js / tagesschau players, when `isElementFullscreenEnabled` is on): WebKit
     /// re-parents the WKWebView into a fresh full-screen `UIWindow` of our own window
-    /// scene at level `UIWindowLevelNormal - 1` (WebKit
-    /// "WKFullScreenWindowControllerIOS"). Neither the `fullscreenState` KVO (element
-    /// fullscreen only, unreliable on iOS 26) nor the UIWindow visibility heuristics in
-    /// [isFullscreenMediaWindow] observe this reparenting itself — so callers use this
-    /// geometric check to suppress layout hacks, above all the negative contentInset
-    /// compensation in the frame setter.
+    /// scene (`WKFullScreenWindowControllerIOS`), initially at level `UIWindowLevelNormal - 1`
+    /// and then raised to `UIWindowLevelNormal` (`beganEnterFullScreenWithInitialFrame`,
+    /// where `makeKeyAndVisible` fires `UIWindow.didBecomeVisibleNotification`).
+    /// Because the `WKWebView` is normally hosted inside Flutter's platform-view wrapper
+    /// (`FlutterWebViewController.myView`), its direct `superview` in the main app window
+    /// is never a `UIWindow` nor `WKFullScreenViewController`'s view; in WebKit's element
+    /// fullscreen window it is a direct child of the fullscreen `_window` (during the initial
+    /// snapshot/layout step) or of `WKFullScreenViewController`'s `_animatingView`, and its
+    /// window is not the Flutter view controller's window.
     private func isInElementFullscreenWindow() -> Bool {
         guard let window = self.window else {
             return false
         }
-        // AVKit video fullscreen windows are already detected via the visibility
-        // notifications and their level is far above `.normal`; only the
-        // element fullscreen window sits just below it.
-        guard window.windowLevel < .normal else {
+        // In normal inline mode, the WKWebView lives inside the Flutter root window
+        // (whose rootViewController is FlutterViewController). When WebKit enters
+        // element fullscreen, it moves the WKWebView into a dedicated UIWindow whose
+        // rootViewController is a plain UIViewController presenting WKFullScreenViewController.
+        if let rootVC = window.rootViewController,
+           NSStringFromClass(type(of: rootVC)).contains("Flutter") {
+            return false
+        }
+        // AVKit video fullscreen windows sit far above `.normal` (and never contain the
+        // WKWebView itself); the element fullscreen window sits at `.normal - 1` or `.normal`.
+        guard window.windowLevel <= .normal else {
             return false
         }
         let isFullScreenSize: Bool
@@ -3031,9 +3060,20 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     }
     
     /// Disables the contentInset-compensation hack (contentInset = -adjustedContentInset)
-    /// for the fullscreen duration. The compensation feeds WebKit a shifted content rect,
-    /// which can make the fullscreen video appear misplaced.
+    /// and re-asserts the configured `contentInsetAdjustmentBehavior` for the fullscreen duration.
+    ///
+    /// During element fullscreen, WebKit's `WKWebViewState().applyTo(webView)` calls
+    /// `_resetScrollViewInsetAdjustmentBehavior` (both on initial reparenting and again in its
+    /// post-repaint `_doAfterNextVisibleContentRectAndPresentationUpdate` callback), which resets
+    /// `scrollView.contentInsetAdjustmentBehavior` back to `.automatic` and causes WebKit to
+    /// subtract the notch safeAreaInsets from the layout viewport width and shift `contentOffset.x`
+    /// toward the cutout.
     private func disableInsetCompensationForFullscreen() {
+        if #available(iOS 11, *) {
+            let rawBehavior = settings?.contentInsetAdjustmentBehavior ?? UIScrollView.ContentInsetAdjustmentBehavior.never.rawValue
+            let behavior = UIScrollView.ContentInsetAdjustmentBehavior(rawValue: rawBehavior) ?? .never
+            scrollView.contentInsetAdjustmentBehavior = behavior
+        }
         scrollView.contentInset = .zero
     }
     
@@ -3041,6 +3081,9 @@ public class InAppWebView: WKWebView, UIScrollViewDelegate, WKUIDelegate,
     /// `disableInsetCompensationForFullscreen()` when leaving fullscreen.
     private func restoreInsetCompensationAfterFullscreen() {
         if #available(iOS 11, *) {
+            let rawBehavior = settings?.contentInsetAdjustmentBehavior ?? UIScrollView.ContentInsetAdjustmentBehavior.never.rawValue
+            let behavior = UIScrollView.ContentInsetAdjustmentBehavior(rawValue: rawBehavior) ?? .never
+            scrollView.contentInsetAdjustmentBehavior = behavior
             if scrollView.adjustedContentInset != .zero {
                 let insetToAdjust = scrollView.adjustedContentInset
                 scrollView.contentInset = UIEdgeInsets(top: -insetToAdjust.top, left: -insetToAdjust.left,
